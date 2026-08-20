@@ -1,207 +1,122 @@
 package server;
 
-import common.ChatService;
-import common.Message;
+import common.*;
+
 import java.rmi.RemoteException;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
 import java.rmi.server.UnicastRemoteObject;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
+import java.util.concurrent.*;
 
-public class ChatServer
-        extends UnicastRemoteObject
-        implements ChatService {
+public class ChatServer extends UnicastRemoteObject
+        implements ChatService, ClockService {
 
-    /*
-     * Stores messages for each user.
-     *
-     * Example:
-     *
-     * Vedansh → [message1, message2]
-     * Rahul   → [message3, message4]
-     */
-    private final Map<String, List<Message>> userMessages;
+    private final Set<String> users =
+            ConcurrentHashMap.newKeySet();
 
-    /*
-     * Stores registered users.
-     */
-    private final Map<String, Boolean> users;
+    private final Map<String, List<Message>> messages =
+            new ConcurrentHashMap<>();
 
-    public ChatServer() throws RemoteException {
+    private final ExecutorService pool =
+            Executors.newFixedThreadPool(5);
 
+    private final LogicalClock clock;
+
+    public ChatServer(long offset) throws RemoteException {
         super();
-
-        userMessages =
-                new ConcurrentHashMap<>();
-
-        users =
-                new ConcurrentHashMap<>();
+        clock = new LogicalClock(offset);
     }
 
-    @Override
-    public synchronized boolean registerUser(
-            String username
-    ) throws RemoteException {
-
-        if (users.containsKey(username)) {
-
-            System.out.println(
-                    "[SERVER] User already exists: "
-                            + username
-            );
-
-            return false;
-        }
-
-        users.put(username, true);
-
-        userMessages.put(
-                username,
-                new ArrayList<>()
-        );
-
-        System.out.println(
-                "[SERVER] User registered: "
-                        + username
-        );
-
-        return true;
-    }
+    // ---------- CHAT METHODS ----------
 
     @Override
-    public synchronized void sendMessage(
-            String sender,
-            String receiver,
-            String content
-    ) throws RemoteException {
+    public boolean registerUser(String username)
+            throws RemoteException {
 
-        /*
-         * Check whether receiver exists.
-         */
-        if (!users.containsKey(receiver)) {
+        try {
+            return pool.submit(() -> {
 
-            System.out.println(
-                    "[SERVER] Receiver not found: "
-                            + receiver
-            );
+                if (users.contains(username))
+                    return false;
 
-            return;
-        }
+                users.add(username);
 
-        /*
-         * Create message.
-         */
-        Message message =
-                new Message(
-                        sender,
-                        receiver,
-                        content
+                messages.put(
+                    username,
+                    Collections.synchronizedList(
+                        new ArrayList<>()
+                    )
                 );
 
-        /*
-         * Store message in receiver's inbox.
-         */
-        userMessages
-                .get(receiver)
-                .add(message);
+                System.out.println(
+                    Thread.currentThread().getName()
+                    + " registered " + username
+                );
 
-        System.out.println(
-                "[SERVER] "
-                        + sender
-                        + " → "
-                        + receiver
-                        + ": "
-                        + content
-        );
+                return true;
+
+            }).get();
+
+        } catch (Exception e) {
+            throw new RemoteException(e.getMessage());
+        }
     }
 
     @Override
-    public synchronized List<Message> getMessages(
-            String username
-    ) throws RemoteException {
+    public void sendMessage(
+            String sender,
+            String receiver,
+            String content)
+            throws RemoteException {
 
-        if (!userMessages.containsKey(username)) {
+        pool.submit(() -> {
 
+            if (!users.contains(receiver))
+                return;
+
+            messages.get(receiver).add(
+                new Message(sender, receiver, content)
+            );
+
+            System.out.println(
+                Thread.currentThread().getName()
+                + " processed: "
+                + sender + " -> " + receiver
+            );
+        });
+    }
+
+    @Override
+    public List<Message> getMessages(String username)
+            throws RemoteException {
+
+        List<Message> list = messages.get(username);
+
+        if (list == null)
             return new ArrayList<>();
-        }
 
-        /*
-         * Return a copy so client cannot
-         * directly modify server data.
-         */
-        return new ArrayList<>(
-                userMessages.get(username)
-        );
+        return new ArrayList<>(list);
     }
 
     @Override
     public String getServerStatus()
             throws RemoteException {
 
-        return "SyncChat Server is running.";
+        return "SyncChat Server is running";
     }
 
-    public static void main(String[] args) {
+    // ---------- CLOCK METHODS ----------
 
-        try {
+    @Override
+    public long getTime()
+            throws RemoteException {
 
-            /*
-             * Create RMI registry.
-             */
-            Registry registry =
-                    LocateRegistry.createRegistry(
-                            1099
-                    );
+        return clock.getTime();
+    }
 
-            /*
-             * Create server.
-             */
-            ChatServer server =
-                    new ChatServer();
+    @Override
+    public void adjustClock(long adjustment)
+            throws RemoteException {
 
-            /*
-             * Register service.
-             */
-            registry.rebind(
-                    "ChatService",
-                    server
-            );
-
-            System.out.println();
-            System.out.println(
-                    "===================================="
-            );
-
-            System.out.println(
-                    "       SYNCCHAT CHAT SERVER"
-            );
-
-            System.out.println(
-                    "===================================="
-            );
-
-            System.out.println(
-                    "RMI Registry : 1099"
-            );
-
-            System.out.println(
-                    "Service      : ChatService"
-            );
-
-            System.out.println(
-                    "Status       : RUNNING"
-            );
-
-            System.out.println(
-                    "===================================="
-            );
-
-        } catch (Exception e) {
-
-            e.printStackTrace();
-        }
+        clock.adjust(adjustment);
     }
 }
